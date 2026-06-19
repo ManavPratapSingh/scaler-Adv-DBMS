@@ -10,12 +10,14 @@ namespace minidb {
 
 // Slotted-page layout for variable-length tuples:
 //
-//   [ num_slots:int32 | free_end:int32 | slot[0] | slot[1] | ... ]
+//   [ num_slots:int32 | free_end:int32 | next_page_id:int32 | slot[0] | ... ]
 //   [                      free space                            ]
 //   [ ... tuple data (grows backward from PAGE_SIZE) ...          ]
 //
 // Each slot is {offset:int32, length:int32}. length == -1 marks a deleted
 // (tombstoned) slot so RIDs referencing it stay stable for indexes/logs.
+// next_page_id lives in the page header itself (not a side table) so the
+// heap file's page chain survives a process restart / crash recovery.
 class HeapPage {
  public:
   struct Slot {
@@ -28,12 +30,14 @@ class HeapPage {
   void Init() {
     NumSlots() = 0;
     FreeEnd() = PAGE_SIZE;
+    NextPageId() = INVALID_PAGE_ID;
   }
 
   int32_t &NumSlots() { return *reinterpret_cast<int32_t *>(raw_); }
   int32_t &FreeEnd() { return *reinterpret_cast<int32_t *>(raw_ + sizeof(int32_t)); }
+  page_id_t &NextPageId() { return *reinterpret_cast<page_id_t *>(raw_ + 2 * sizeof(int32_t)); }
 
-  static constexpr size_t kHeaderSize = 2 * sizeof(int32_t);
+  static constexpr size_t kHeaderSize = 3 * sizeof(int32_t);
 
   Slot *SlotArray() { return reinterpret_cast<Slot *>(raw_ + kHeaderSize); }
 
