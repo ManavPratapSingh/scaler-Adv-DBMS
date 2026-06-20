@@ -46,12 +46,48 @@ QueryResult Executor::ExecInsert(const InsertStmt &s, txn_id_t txn_id, WalManage
                 std::to_string(s.values.size());
     return r;
   }
-  Tuple tup(s.values);
-  std::string serialized = tup.Serialize();
-  RID rid = t->heap->InsertTuple(serialized);
-  if (wal && txn_id != 0) wal->AppendInsert(txn_id, s.table_name, rid, serialized);
+
+  // Validate everything before touching the heap/index/WAL: a half-applied
+  // insert (e.g. the heap row written but the type check failing after)
+  // is worse than rejecting cleanly up front.
+  const auto &columns = t->schema.Columns();
+  for (size_t i = 0; i < s.values.size(); i++) {
+    if (s.values[i].GetType() != columns[i].type) {
+      r.ok = false;
+      r.message = "type mismatch for column '" + columns[i].name + "': expected " +
+                  (columns[i].type == TypeId::INTEGER ? "INTEGER" : "VARCHAR");
+      return r;
+    }
+  }
 
   int pk_idx = t->schema.PrimaryKeyIndex();
+  if (pk_idx >= 0 && t->index) {
+    if (t->index->Search(s.values[pk_idx].AsInt()).has_value()) {
+      r.ok = false;
+      r.message = "duplicate primary key: " + s.values[pk_idx].ToString();
+      return r;
+    }
+  }
+
+  Tuple tup(s.values);
+  std::string serialized = tup.Serialize();
+  if (serialized.size() > HeapPage::MaxTupleSize()) {
+    r.ok = false;
+    r.message = "row too large to fit on a page (" + std::to_string(serialized.size()) +
+                " bytes, max " + std::to_string(HeapPage::MaxTupleSize()) + ")";
+    return r;
+  }
+
+  RID rid = t->heap->InsertTuple(serialized);
+  if (!rid.Valid()) {
+    // Shouldn't happen given the size check above, but never silently
+    // report success for a row that didn't actually get stored.
+    r.ok = false;
+    r.message = "insert failed: no room for the row";
+    return r;
+  }
+  if (wal && txn_id != 0) wal->AppendInsert(txn_id, s.table_name, rid, serialized);
+
   if (pk_idx >= 0 && t->index) t->index->Insert(s.values[pk_idx].AsInt(), rid);
   catalog_->NotifyRowInserted(s.table_name);
 

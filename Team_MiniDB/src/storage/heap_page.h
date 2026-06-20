@@ -41,6 +41,12 @@ class HeapPage {
 
   Slot *SlotArray() { return reinterpret_cast<Slot *>(raw_ + kHeaderSize); }
 
+  // Largest tuple that could ever fit, even on a brand-new empty page (one
+  // slot's worth of overhead reserved). Callers use this to reject an
+  // oversized row up front instead of silently dropping it after
+  // HeapFile::InsertTuple exhausts every page without finding room.
+  static constexpr size_t MaxTupleSize() { return PAGE_SIZE - kHeaderSize - sizeof(Slot); }
+
   size_t FreeSpace() const {
     auto *self = const_cast<HeapPage *>(this);
     return self->FreeEnd() - kHeaderSize - self->NumSlots() * sizeof(Slot);

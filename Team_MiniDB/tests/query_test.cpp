@@ -72,6 +72,61 @@ int main() {
     assert(check.rows.empty());
   }
 
+  // --- Regression: duplicate primary key must be rejected, not silently
+  // orphan the original row (QA Bug 2). ---
+  {
+    auto r = Run(ex, "INSERT INTO users VALUES (1, 'duplicate')");
+    assert(!r.ok);
+    assert(r.message.find("duplicate primary key") != std::string::npos);
+    auto check = Run(ex, "SELECT name FROM users WHERE id = 1");
+    assert(check.rows.size() == 1);
+    assert(check.rows[0][0] == "user1");  // original row untouched
+    auto full_scan = Run(ex, "SELECT * FROM users");
+    int count_id_1 = 0;
+    for (auto &row : full_scan.rows) if (row[0] == "1") count_id_1++;
+    assert(count_id_1 == 1);  // SeqScan and IndexScan must agree
+  }
+
+  // --- Regression: a value of the wrong type must be rejected before any
+  // heap/WAL/index mutation happens (QA Bug 3 - this used to silently
+  // corrupt the row or, worse, half-apply it and then report an error). ---
+  {
+    auto before = Run(ex, "SELECT * FROM users");
+    size_t row_count_before = before.rows.size();
+
+    auto r1 = Run(ex, "INSERT INTO users VALUES (99, 12345)");  // INT where VARCHAR expected
+    assert(!r1.ok);
+    assert(r1.message.find("type mismatch") != std::string::npos);
+
+    auto r2 = Run(ex, "INSERT INTO users VALUES ('not-an-int', 'x')");  // VARCHAR where INT expected
+    assert(!r2.ok);
+    assert(r2.message.find("type mismatch") != std::string::npos);
+
+    auto after = Run(ex, "SELECT * FROM users");
+    assert(after.rows.size() == row_count_before);  // nothing was partially inserted
+  }
+
+  // --- Regression: an oversized row must be rejected up front, not
+  // silently "succeed" while the row is unreachable by any scan (QA Bug 4). ---
+  {
+    std::string huge(5000, 'a');
+    auto r = Run(ex, "INSERT INTO users VALUES (100, '" + huge + "')");
+    assert(!r.ok);
+    assert(r.message.find("too large") != std::string::npos);
+    auto check = Run(ex, "SELECT * FROM users WHERE id = 100");
+    assert(check.rows.empty());
+  }
+
+  // --- Regression: doubled single quotes are a standard SQL escape for a
+  // literal quote inside a string (QA Bug 7). ---
+  {
+    auto r = Run(ex, "INSERT INTO users VALUES (101, 'O''Brien')");
+    assert(r.ok);
+    auto check = Run(ex, "SELECT name FROM users WHERE id = 101");
+    assert(check.rows.size() == 1);
+    assert(check.rows[0][0] == "O'Brien");
+  }
+
   std::remove("test_query.db");
   std::remove("test_query.db.wal");
   std::remove("test_query.meta");
