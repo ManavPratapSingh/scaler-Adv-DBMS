@@ -28,3 +28,4 @@ target_link_libraries(minidb_replica PUBLIC minidb_core)
 
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(benchmarks)
