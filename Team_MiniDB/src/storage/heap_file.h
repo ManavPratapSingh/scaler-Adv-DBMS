@@ -62,6 +62,15 @@ class HeapFile {
     return ok;
   }
 
+  // Undo of DeleteTuple - used only by the recovery manager.
+  bool RestoreTuple(RID rid, int32_t original_length) {
+    Page *page = bpm_->FetchPage(rid.page_id);
+    HeapPage hp(page->GetData());
+    bool ok = hp.RestoreTuple(rid.slot_num, original_length);
+    bpm_->UnpinPage(rid.page_id, true);
+    return ok;
+  }
+
   // Calls fn(rid, tuple_bytes) for every live tuple in the file (full scan).
   void Scan(const std::function<void(RID, const std::string &)> &fn) {
     page_id_t pid = first_page_id_;

@@ -63,6 +63,11 @@ void DiskManager::DeallocatePage(page_id_t page_id) {
   free_list_.push_back(page_id);
 }
 
+void DiskManager::EnsureCapacity(int min_num_pages) {
+  std::lock_guard<std::mutex> guard(db_io_latch_);
+  if (min_num_pages > num_pages_) num_pages_ = min_num_pages;
+}
+
 void DiskManager::AppendLogRecord(const char *data, size_t size) {
   std::lock_guard<std::mutex> guard(log_io_latch_);
   log_io_.seekp(0, std::ios::end);
@@ -77,6 +82,14 @@ std::ifstream DiskManager::OpenLogForReading() {
 void DiskManager::FlushLog() {
   std::lock_guard<std::mutex> guard(log_io_latch_);
   log_io_.flush();
+}
+
+void DiskManager::TruncateLog() {
+  std::lock_guard<std::mutex> guard(log_io_latch_);
+  log_io_.close();
+  log_io_.open(log_file_name_, std::ios::out | std::ios::binary | std::ios::trunc);
+  log_io_.close();
+  log_io_.open(log_file_name_, std::ios::in | std::ios::out | std::ios::binary | std::ios::app);
 }
 
 }  // namespace minidb

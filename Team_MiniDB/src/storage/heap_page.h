@@ -73,6 +73,15 @@ class HeapPage {
     return true;
   }
 
+  // Undo of DeleteTuple: the tombstoned slot's bytes are never overwritten
+  // by DeleteTuple, so restoring is just un-flipping the length sign back
+  // to its original value (used by recovery's undo pass).
+  bool RestoreTuple(int slot_num, int32_t original_length) {
+    if (slot_num < 0 || slot_num >= NumSlots()) return false;
+    SlotArray()[slot_num].length = original_length;
+    return true;
+  }
+
   int NumTupleSlots() { return NumSlots(); }
 
  private:

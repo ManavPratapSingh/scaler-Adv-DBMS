@@ -4,13 +4,13 @@
 
 namespace minidb {
 
-QueryResult Executor::Execute(const Statement &stmt) {
+QueryResult Executor::Execute(const Statement &stmt, txn_id_t txn_id, WalManager *wal) {
   try {
     switch (stmt.kind) {
       case StmtKind::CREATE_TABLE: return ExecCreateTable(stmt.create_table);
-      case StmtKind::INSERT: return ExecInsert(stmt.insert);
+      case StmtKind::INSERT: return ExecInsert(stmt.insert, txn_id, wal);
       case StmtKind::SELECT: return ExecSelect(stmt.select);
-      case StmtKind::DELETE: return ExecDelete(stmt.del);
+      case StmtKind::DELETE: return ExecDelete(stmt.del, txn_id, wal);
     }
   } catch (const std::exception &e) {
     QueryResult r;
@@ -36,7 +36,7 @@ QueryResult Executor::ExecCreateTable(const CreateTableStmt &s) {
   return r;
 }
 
-QueryResult Executor::ExecInsert(const InsertStmt &s) {
+QueryResult Executor::ExecInsert(const InsertStmt &s, txn_id_t txn_id, WalManager *wal) {
   QueryResult r;
   TableInfo *t = catalog_->GetTable(s.table_name);
   if (!t) { r.ok = false; r.message = "no such table: " + s.table_name; return r; }
@@ -47,7 +47,9 @@ QueryResult Executor::ExecInsert(const InsertStmt &s) {
     return r;
   }
   Tuple tup(s.values);
-  RID rid = t->heap->InsertTuple(tup.Serialize());
+  std::string serialized = tup.Serialize();
+  RID rid = t->heap->InsertTuple(serialized);
+  if (wal && txn_id != 0) wal->AppendInsert(txn_id, s.table_name, rid, serialized);
 
   int pk_idx = t->schema.PrimaryKeyIndex();
   if (pk_idx >= 0 && t->index) t->index->Insert(s.values[pk_idx].AsInt(), rid);
@@ -77,7 +79,7 @@ QueryResult Executor::ExecSelect(const SelectStmt &s) {
   return r;
 }
 
-QueryResult Executor::ExecDelete(const DeleteStmt &s) {
+QueryResult Executor::ExecDelete(const DeleteStmt &s, txn_id_t txn_id, WalManager *wal) {
   QueryResult r;
   TableInfo *t = catalog_->GetTable(s.table_name);
   if (!t) { r.ok = false; r.message = "no such table: " + s.table_name; return r; }
@@ -109,6 +111,11 @@ QueryResult Executor::ExecDelete(const DeleteStmt &s) {
     bool ok = true;
     for (auto &p : resolved) if (!EvalPredicate(p, *row)) { ok = false; break; }
     if (!ok) continue;
+    if (wal && txn_id != 0) {
+      std::string before_image;
+      t->heap->GetTuple(row->rid, &before_image);
+      wal->AppendDelete(txn_id, s.table_name, row->rid, before_image);
+    }
     t->heap->DeleteTuple(row->rid);
     if (pk_idx >= 0 && t->index) t->index->Remove(row->values[pk_idx].AsInt());
     catalog_->NotifyRowDeleted(s.table_name);

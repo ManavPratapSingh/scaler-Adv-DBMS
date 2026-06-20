@@ -25,6 +25,11 @@ class DiskManager {
   // and returns its id. Does not initialize content - caller must do that.
   page_id_t AllocatePage();
   void DeallocatePage(page_id_t page_id);
+  // Bumps the page-id counter so the next AllocatePage() can't collide
+  // with a page_id that's already referenced (e.g. by the WAL) but never
+  // reached disk before a crash, since on-disk file size alone would
+  // otherwise look like that page was never allocated.
+  void EnsureCapacity(int min_num_pages);
 
   int GetNumPages() const { return num_pages_; }
 
@@ -32,6 +37,10 @@ class DiskManager {
   void AppendLogRecord(const char *data, size_t size);
   std::ifstream OpenLogForReading();
   void FlushLog();
+  // Clears the WAL - called after recovery has applied everything and
+  // flushed data pages, acting as a checkpoint so future restarts don't
+  // re-replay history that's now durable in the data file.
+  void TruncateLog();
 
  private:
   std::fstream db_io_;
