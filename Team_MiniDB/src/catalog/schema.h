@@ -1,6 +1,7 @@
 #pragma once
 #include <cstring>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -64,19 +65,28 @@ class Tuple {
     return out;
   }
 
+  // Bounds-checked: a VARCHAR length field that's corrupt or (pre-fix)
+  // produced by inserting a value of the wrong type used to be trusted as
+  //-is, letting `offset` jump arbitrarily far past `data` and turning the
+  // next column's read into an out-of-bounds memory access. Every read is
+  // now checked against the remaining buffer before it happens.
   static Tuple Deserialize(const std::string &data, const Schema &schema) {
     std::vector<Value> values;
     size_t offset = 0;
     for (const auto &col : schema.Columns()) {
       if (col.type == TypeId::INTEGER) {
+        if (offset + sizeof(int64_t) > data.size()) throw std::runtime_error("corrupt tuple: truncated INTEGER field");
         int64_t x;
         memcpy(&x, data.data() + offset, sizeof(x));
         offset += sizeof(x);
         values.push_back(Value::Int(x));
       } else {
+        if (offset + sizeof(int32_t) > data.size()) throw std::runtime_error("corrupt tuple: truncated VARCHAR length");
         int32_t len;
         memcpy(&len, data.data() + offset, sizeof(len));
         offset += sizeof(len);
+        if (len < 0 || offset + static_cast<size_t>(len) > data.size())
+          throw std::runtime_error("corrupt tuple: VARCHAR length out of bounds");
         values.push_back(Value::Str(data.substr(offset, len)));
         offset += len;
       }
