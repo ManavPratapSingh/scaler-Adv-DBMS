@@ -19,16 +19,36 @@ predicate on `id` (PK -> IndexScan) vs. the logically equivalent lookup on
 
 | rows (N) | IndexScan (us/lookup) | SeqScan (us/lookup) | Speedup |
 |---------:|-----------------------:|----------------------:|--------:|
-|    1,000 |                 145.56 |                1069.55 |    7.3x |
-|    5,000 |                 225.87 |                5483.62 |   24.3x |
-|   20,000 |                 273.51 |               21985.30 |   80.4x |
+|    1,000 |                 129.64 |                 118.31 |    0.9x |
+|    5,000 |                 191.67 |                 592.91 |    3.1x |
+|   20,000 |                 241.53 |                2474.07 |   10.2x |
 
-**Analysis.** IndexScan latency grows ~O(log N) (273us at 20,000 rows vs.
-145us at 1,000 - a 20x increase in N costs less than 2x in latency).
-SeqScan grows linearly with N as expected, since every lookup walks the
-entire heap file. The gap (7x -> 80x) is exactly why the optimizer in
-[optimizer.cpp](../src/query/optimizer.cpp) prefers IndexScan whenever an
-equality predicate on the primary key is available.
+**Analysis.** IndexScan latency grows ~O(log N) as expected (242us at
+20,000 rows vs. 130us at 1,000 - a 20x increase in N costs less than 2x in
+latency), and SeqScan grows ~linearly. The crossover point matters more
+than the headline number, though: **at N=1,000, IndexScan is consistently
+~10% *slower* than SeqScan** (0.9x "speedup"), reproduced across multiple
+runs. This is a direct consequence of `BTREE_LEAF_MAX = BTREE_INTERNAL_MAX
+= 4` (deliberately tiny, so a handful of inserts already produces a
+multi-level tree for demo purposes - see Section 4 of the README). At
+1,000 rows that fanout produces a ~5-level tree, and each level costs a
+full `BufferPool::FetchPage`/`UnpinPage` round trip (hash-map lookup +
+mutex) regardless of whether the page is already cached - overhead a
+SeqScan over a few dozen heap pages doesn't pay per-row. The crossover is
+between 1,000 and 5,000 rows on this machine; past it, IndexScan wins by a
+growing margin (3.1x at 5k, 10.2x at 20k) because SeqScan cost is genuinely
+linear while IndexScan's `log_4(N)` barely grows.
+
+This means the optimizer's blanket "always prefer IndexScan for an
+equality predicate on the PK" rule
+([optimizer.cpp](../src/query/optimizer.cpp)) is *not* cost-optimal at
+small table sizes with this fanout - a real, measured optimizer
+imprecision, not a benchmark artifact. A more accurate optimizer would
+need either a larger fanout (trading away the easy-to-demo multi-level
+splits at small N) or a small-N cost correction. Documented here rather
+than silently "fixed" by cherry-picking table sizes that make IndexScan
+win, since the whole point of measuring is to find out where the
+optimizer's assumptions break.
 
 ## 2. Buffer pool size vs. repeated full-scan latency
 
@@ -37,9 +57,9 @@ rows) with pool sizes of 4, 64, and 1024 frames.
 
 | Pool frames | Total time (20 scans) |
 |------------:|-----------------------:|
-|           4 |               157.98 ms |
-|          64 |               132.92 ms |
-|        1024 |               138.49 ms |
+|           4 |                57.93 ms |
+|          64 |                33.86 ms |
+|        1024 |                34.82 ms |
 
 **Analysis.** The gap is real but modest here because `DiskManager`'s
 reads/writes go through `fstream` to a file that's almost entirely warm
@@ -59,7 +79,7 @@ each over TCP, and measures how long after the primary's last write the
 replica has applied everything.
 
 ```
-Primary applied 500 writes in 51.42ms (9723.2 writes/sec)
+Primary applied 500 writes in 67.82ms (7372.1 writes/sec)
 Replica caught up 1.26ms after the primary's last write (replication lag)
 ```
 

@@ -195,7 +195,13 @@ File: [src/query/optimizer.cpp](src/query/optimizer.cpp)
 - **Access path selection:** `PlanBaseRelation` picks `IndexScanNode`
   whenever there's an equality predicate on the table's primary key,
   otherwise `SeqScanNode` - demonstrated directly by `EXPLAIN` in the CLI
-  and by the [seqscan-vs-index benchmark](benchmarks/RESULTS.md).
+  and by the [seqscan-vs-index benchmark](benchmarks/RESULTS.md). **This
+  rule is unconditional and not actually cost-optimal at small table
+  sizes**: the benchmark measured IndexScan as ~10% *slower* than SeqScan
+  at 1,000 rows, because the deliberately tiny B+Tree fanout (Section 4)
+  produces a tree deep enough that its per-level buffer-pool overhead
+  outweighs a cheap small scan. The optimizer doesn't model this crossover
+  - see RESULTS.md for the full numbers and why.
 - **Join order selection:** for a two-table join, each side's
   post-filter cardinality is estimated, and the smaller side drives the
   loop (`left_card <= right_card` decides which is "outer").
@@ -328,13 +334,19 @@ Summary:
 
 | Benchmark | Headline result |
 |---|---|
-| IndexScan vs. SeqScan | 7.3x faster at 1k rows, 80.4x faster at 20k rows |
-| Buffer pool size (4/64/1024 frames) | 157.98ms / 132.92ms / 138.49ms for 20 full scans (modest gap - OS page cache absorbs most of the difference on this hardware) |
-| Replication lag (500 writes) | ~1.26ms after the primary's last write; primary throughput ~9,723 writes/sec |
+| IndexScan vs. SeqScan | **Loses** at 1k rows (0.9x) due to the deliberately tiny B+Tree fanout's per-level overhead, then wins decisively as N grows: 3.1x at 5k, 10.2x at 20k rows - see RESULTS.md for why the optimizer's blanket preference isn't cost-optimal below the crossover point |
+| Buffer pool size (4/64/1024 frames) | 57.93ms / 33.86ms / 34.82ms for 20 full scans (modest gap above 4 frames - OS page cache absorbs most of the difference on this hardware) |
+| Replication lag (500 writes) | ~1.26ms after the primary's last write; primary throughput ~7,372 writes/sec |
 
 ## 11. Limitations
 
 - **B+Tree deletion** doesn't rebalance/merge underflowed nodes (Section 4).
+- **The optimizer always prefers IndexScan over SeqScan for a PK equality
+  predicate, even when that's not actually cheaper** - measured to lose
+  by ~10% at 1,000 rows because of the tiny fixed fanout's per-level
+  overhead (Section 6, `benchmarks/RESULTS.md`). A cost model that
+  accounted for buffer-pool round-trip cost per tree level, not just
+  abstract page counts, would catch this.
 - **Heap insert is O(pages)**: `HeapFile::InsertTuple` re-walks the page
   chain from the first page every time looking for free space, instead of
   remembering the last page with room. Fine at the scale this project
